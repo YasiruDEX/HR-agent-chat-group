@@ -189,7 +189,7 @@ def generate_with_agent(kind: str) -> None:
          "- No hype words (epic, champions, brilliance, crush it, let's go, devour) and no exclamation spam.\n"
          "- Dry, clever and grounded beats loud and cheesy.\n"
          "Examples of the right tone:\n"
-         "- 🍛🍜 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 🍕😄\n"
+         "- 🍛🍚 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 🍛😄\n"
          "- ☕🍪 Tea time, Agent Manager Team. That PR isn't going to review itself, but it can definitely wait 15 minutes. 🫖\n"
          "{menu_note}"
          "Write something new in that spirit; don't copy the examples. "
@@ -206,7 +206,9 @@ def generate_with_agent(kind: str) -> None:
     menu_note = (
         f"Today's {kind} menu: {item}. Work it into the message naturally and make it sound tempting. "
         "If it's a long list, highlight one or two standout dishes instead of listing everything; "
-        "match the emojis to the food.\n" if item else "")
+        "Every food emoji must depict something actually on today's menu (e.g. rice/curry -> 🍛🍚, chicken -> 🍗, "
+        "fish -> 🐟, buns/bread -> 🍞🥯, vegetables -> 🥗🥦). Never use emojis for food that isn't on the menu, "
+        "e.g. no 🍕 or 🍜 unless pizza or noodles are listed.\n" if item else "")
     executor.invoke({
         "menu_note": menu_note,
         "team": TEAM_NAME, "kind": kind, "vibe": VIBE, "angle": random.choice(ANGLES),

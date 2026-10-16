@@ -23,10 +23,22 @@ LUNCH_TIMES = os.getenv("LUNCH_TIMES", "12:30")
 TEA_TIMES = os.getenv("TEA_TIMES", "15:30")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Colombo")
 SCHEDULE_DAYS = os.getenv("SCHEDULE_DAYS", "mon-fri")
-VIBE = os.getenv("VIBE", "casual, dry and witty like a dev teammate, light on emojis")
+VIBE = os.getenv("VIBE", "casual, dry and witty like a dev teammate, generous with food emojis")
 TEAM_NAME = os.getenv("TEAM_NAME", "Agent Manager Team")
 # Static messages are only used if explicitly enabled; by default every message is AI-generated.
 ALLOW_STATIC_FALLBACK = os.getenv("ALLOW_STATIC_FALLBACK", "false").lower() == "true"
+
+# GIFs attached to break messages. Override with comma-separated URLs in LUNCH_GIF_URLS / TEA_GIF_URLS,
+# or set GIPHY_API_KEY to pull a fresh random GIF from Giphy each time.
+SEND_GIF = os.getenv("SEND_GIF", "true").lower() == "true"
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
+GIF_SEARCH = {"lunch": os.getenv("LUNCH_GIF_QUERY", "hungry"), "tea": os.getenv("TEA_GIF_QUERY", "tea time")}
+DEFAULT_GIFS = {
+    "lunch": ["https://lh5.googleusercontent.com/proxy/kCYn1T8dfpT-DahTs9cFIr5lUzu6iifCpAbzUGNzXJPmFMNpB0PLSYMtbxANU6W94fMqM2p59hDVWG1lbMce3rI23qP0HHHtUilHH3t6Om0"],
+    "tea": ["https://lh5.googleusercontent.com/proxy/l6RaNrQUsZEBdiHkoVvvs-N7kpGawtmajVpKOey-1x4YEhmeqepxJLxy4soxH0YxZ7Li04TEVaHAuhI6SZ7cWN5JBE8oyr-xE2fUJw"],
+}
+GIFS = {k: [u.strip() for u in os.getenv(f"{k.upper()}_GIF_URLS", "").split(",") if u.strip()] or v
+        for k, v in DEFAULT_GIFS.items()}
 
 # A random creative angle per message keeps the AI output fresh day to day.
 ANGLES = [
@@ -50,11 +62,30 @@ FALLBACKS = {
 }
 
 
-def post_to_google_chat(text: str) -> str:
-    """Send a text message to the configured Google Chat space."""
+def pick_gif(kind: str):
+    """Return a GIF URL for this break, or None if GIFs are disabled."""
+    if not SEND_GIF:
+        return None
+    if GIPHY_API_KEY:
+        try:
+            r = requests.get("https://api.giphy.com/v1/gifs/random", timeout=10, params={
+                "api_key": GIPHY_API_KEY, "tag": GIF_SEARCH[kind], "rating": "g"})
+            r.raise_for_status()
+            return r.json()["data"]["images"]["downsized"]["url"]
+        except Exception:
+            log.exception("Giphy lookup failed; using built-in GIFs")
+    return random.choice(GIFS[kind])
+
+
+def post_to_google_chat(text: str, gif_url=None) -> str:
+    """Send a text message (optionally with a GIF) to the configured Google Chat space."""
+    payload = {"text": text}
+    if gif_url:
+        payload["cardsV2"] = [{"cardId": "gif", "card": {"sections": [
+            {"widgets": [{"image": {"imageUrl": gif_url, "altText": "GIF"}}]}]}}]
     resp = requests.post(
         WEBHOOK_URL,
-        json={"text": text},
+        json=payload,
         headers={"Content-Type": "application/json; charset=UTF-8"},
         timeout=15,
     )
@@ -94,7 +125,7 @@ def generate_with_agent(kind: str) -> None:
     @tool
     def send_google_chat_message(message: str) -> str:
         """Send the final message to the team's Google Chat space."""
-        return post_to_google_chat(message)
+        return post_to_google_chat(message, pick_gif(kind))
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
@@ -102,13 +133,15 @@ def generate_with_agent(kind: str) -> None:
          "Write ONE {kind}-time message, 1-2 sentences, like a witty teammate would post it. "
          "Vibe: {vibe}. Angle for this one: {angle}. Today is {today}.\n"
          "Style rules:\n"
-         "- At most 2 emojis: usually one at the start and optionally one at the end. Never more.\n"
+         "- Use 3-4 food/drink emojis that fit the moment (lunch: 🍛🍜🍕🍔🌮🥗🍱🍗🥪🍝🍩, tea: ☕🫖🍪🧁🍰🥐🍵), "
+         "e.g. a couple at the start and one or two at the end. Only food/drink emojis plus at most one face like 😄. "
+         "No bugs, rockets, stars, sparkles or party emojis.\n"
          "- Address the team exactly as '{team}'. Don't invent nicknames.\n"
          "- No hype words (epic, champions, brilliance, crush it, let's go, devour) and no exclamation spam.\n"
          "- Dry, clever and grounded beats loud and cheesy.\n"
          "Examples of the right tone:\n"
-         "- 🍛 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 😄\n"
-         "- ☕ Tea time, Agent Manager Team. That PR isn't going to review itself, but it can definitely wait 15 minutes.\n"
+         "- 🍛🍜 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 🍕😄\n"
+         "- ☕🍪 Tea time, Agent Manager Team. That PR isn't going to review itself, but it can definitely wait 15 minutes. 🫖\n"
          "Write something new in that spirit; don't copy the examples. "
          "Call send_google_chat_message exactly once with the final message."),
         ("human", "It's {kind} time now ({now}). Compose and send the message."),
@@ -137,7 +170,7 @@ def run_break(kind: str) -> None:
     if not ALLOW_STATIC_FALLBACK:
         raise RuntimeError(f"Could not generate {kind} message (set OPENAI_API_KEY)")
     log.warning("Sending static fallback message")
-    log.info(post_to_google_chat(random.choice(FALLBACKS[kind]).format(team=TEAM_NAME)))
+    log.info(post_to_google_chat(random.choice(FALLBACKS[kind]).format(team=TEAM_NAME), pick_gif(kind)))
 
 
 def schedule(background: bool = False):

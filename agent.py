@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -24,6 +25,17 @@ TIMEZONE = os.getenv("TIMEZONE", "Asia/Colombo")
 SCHEDULE_DAYS = os.getenv("SCHEDULE_DAYS", "mon-fri")
 VIBE = os.getenv("VIBE", "fun, upbeat, witty, with a sprinkle of emojis")
 TEAM_NAME = os.getenv("TEAM_NAME", "Agent Manager Team")
+# Static messages are only used if explicitly enabled; by default every message is AI-generated.
+ALLOW_STATIC_FALLBACK = os.getenv("ALLOW_STATIC_FALLBACK", "false").lower() == "true"
+
+# A random creative angle per message keeps the AI output fresh day to day.
+ANGLES = [
+    "a movie-trailer voiceover", "a breaking-news bulletin", "a sports commentator",
+    "a pirate captain", "a tiny haiku plus a call to action", "a dramatic Shakespearean line",
+    "a sci-fi mission control announcement", "a nature documentary narrator",
+    "a fake system/deploy log", "a motivational coach", "a food critic",
+    "a weather forecast", "a mysterious secret-agent briefing", "a game level-up notification",
+]
 
 FALLBACKS = {
     "lunch": [
@@ -65,7 +77,7 @@ def generate_with_agent(kind: str) -> None:
         ("system",
          "You are the break-time hype bot for the '{team}' Google Chat group. "
          "Write ONE short, original, cool message (max ~3 lines) announcing {kind} time. "
-         "Vibe: {vibe}. Don't repeat cliches; today is {today}. "
+         "Vibe: {vibe}. Creative angle for this one: {angle}. Don't repeat cliches; today is {today}. "
          "Google Chat supports *bold* and _italic_. "
          "When ready, call send_google_chat_message exactly once with the message."),
         ("human", "It's {kind} time now ({now}). Compose and send the message."),
@@ -76,7 +88,7 @@ def generate_with_agent(kind: str) -> None:
     executor = AgentExecutor(agent=create_tool_calling_agent(llm, tools, prompt), tools=tools)
     now = datetime.now(ZoneInfo(TIMEZONE))
     executor.invoke({
-        "team": TEAM_NAME, "kind": kind, "vibe": VIBE,
+        "team": TEAM_NAME, "kind": kind, "vibe": VIBE, "angle": random.choice(ANGLES),
         "today": now.strftime("%A, %d %B"), "now": now.strftime("%I:%M %p"),
     })
 
@@ -88,14 +100,17 @@ def run_break(kind: str) -> None:
             generate_with_agent(kind)
             return
         except Exception:
-            log.exception("Agent failed; sending fallback message")
+            log.exception("AI generation failed")
     else:
-        log.warning("OPENAI_API_KEY not set; sending fallback message")
+        log.error("OPENAI_API_KEY not set; cannot generate %s message", kind)
+    if not ALLOW_STATIC_FALLBACK:
+        raise RuntimeError(f"Could not generate {kind} message (set OPENAI_API_KEY)")
+    log.warning("Sending static fallback message")
     log.info(post_to_google_chat(random.choice(FALLBACKS[kind]).format(team=TEAM_NAME)))
 
 
-def schedule() -> None:
-    sched = BlockingScheduler(timezone=TIMEZONE)
+def schedule(background: bool = False):
+    sched = (BackgroundScheduler if background else BlockingScheduler)(timezone=TIMEZONE)
     for kind, times in (("lunch", LUNCH_TIMES), ("tea", TEA_TIMES)):
         for t in filter(None, (x.strip() for x in times.split(","))):
             hour, minute = t.split(":")
@@ -104,6 +119,7 @@ def schedule() -> None:
                           args=[kind], id=f"{kind}-{t}", misfire_grace_time=300)
             log.info("Scheduled %s at %s (%s, %s)", kind, t, SCHEDULE_DAYS, TIMEZONE)
     sched.start()
+    return sched
 
 
 if __name__ == "__main__":

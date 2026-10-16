@@ -56,6 +56,12 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
         return schedule_summary()
 
     @tool
+    def get_today_menu() -> str:
+        """Get today's lunch and tea items from the menu sheet."""
+        return (f"Lunch: {agent.get_today_menu('lunch') or 'not set'}; "
+                f"Tea: {agent.get_today_menu('tea') or 'not set'}")
+
+    @tool
     def trigger_break_message(kind: str) -> str:
         """Immediately generate and post a break message to the team. kind must be 'lunch' or 'tea'."""
         if kind not in ("lunch", "tea"):
@@ -77,7 +83,7 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
         mention_all: true to @mention everyone (only if the user asks or it's urgent)."""
         return agent.post_announcement(message, title, important, mention_all)
 
-    tools = [get_schedule, trigger_break_message, send_custom_message, send_announcement]
+    tools = [get_schedule, get_today_menu, trigger_break_message, send_custom_message, send_announcement]
     prompt = ChatPromptTemplate.from_messages([
         ("system",
          "You are the break-time bot for the '{team}' Google Chat group. You announce lunch and tea "

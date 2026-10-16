@@ -1,5 +1,7 @@
 """Break-time bot: a LangChain agent that posts lunch & tea reminders to Google Chat."""
 import argparse
+import csv
+import io
 import logging
 import os
 import random
@@ -27,6 +29,9 @@ SCHEDULE_DAYS = os.getenv("SCHEDULE_DAYS", "mon-fri")
 VIBE = os.getenv("VIBE", "casual, dry and witty like a dev teammate, generous with food emojis")
 TEAM_NAME = os.getenv("TEAM_NAME", "Agent Manager Team")
 # Static messages are only used if explicitly enabled; by default every message is AI-generated.
+# Daily menu sheet (columns: date, lunch, tea). Accepts a Google Sheets share link or a CSV URL.
+MENU_SHEET_URL = os.getenv("MENU_SHEET_URL", "")
+
 # Commute reminder: a separate group, posted only by the scheduler (never from /chat).
 COMMUTE_WEBHOOK_URL = os.getenv("COMMUTE_WEBHOOK_URL", "")
 COMMUTE_TIMES = os.getenv("COMMUTE_TIMES", "13:30")
@@ -68,6 +73,42 @@ FALLBACKS = {
         "🍪 3:30 vibes: tea + biscuits + 10 minutes of not thinking about deadlines. Go go go, {team}!",
     ],
 }
+
+
+def _menu_csv_url(url: str) -> str:
+    m = re.search(r"docs\.google\.com/spreadsheets/d/([\w-]+)", url)
+    if m and "output=csv" not in url and "format=csv" not in url:
+        gid = re.search(r"[#&?]gid=(\d+)", url)
+        return (f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv"
+                + (f"&gid={gid.group(1)}" if gid else ""))
+    return url
+
+
+def _parse_date(value: str):
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(value.strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def get_today_menu(kind: str):
+    """Return today's lunch/tea item from the menu sheet, or None if unset/unavailable."""
+    if not MENU_SHEET_URL:
+        return None
+    try:
+        r = requests.get(_menu_csv_url(MENU_SHEET_URL), timeout=15)
+        r.raise_for_status()
+        r.encoding = "utf-8"
+        today = datetime.now(ZoneInfo(TIMEZONE)).date()
+        for row in csv.DictReader(io.StringIO(r.text)):
+            row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+            if _parse_date(row.get("date", "")) == today:
+                return row.get(kind) or None
+    except Exception:
+        log.exception("Could not read menu sheet")
+    return None
 
 
 def pick_gif(kind: str):
@@ -150,6 +191,7 @@ def generate_with_agent(kind: str) -> None:
          "Examples of the right tone:\n"
          "- 🍛🍜 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 🍕😄\n"
          "- ☕🍪 Tea time, Agent Manager Team. That PR isn't going to review itself, but it can definitely wait 15 minutes. 🫖\n"
+         "{menu_note}"
          "Write something new in that spirit; don't copy the examples. "
          "Call send_google_chat_message exactly once with the final message."),
         ("human", "It's {kind} time now ({now}). Compose and send the message."),
@@ -159,7 +201,14 @@ def generate_with_agent(kind: str) -> None:
     tools = [send_google_chat_message]
     executor = AgentExecutor(agent=create_tool_calling_agent(llm, tools, prompt), tools=tools)
     now = datetime.now(ZoneInfo(TIMEZONE))
+    item = get_today_menu(kind)
+    log.info("Today's %s menu: %s", kind, item or "(not set)")
+    menu_note = (
+        f"Today's {kind} menu: {item}. Work it into the message naturally and make it sound tempting. "
+        "If it's a long list, highlight one or two standout dishes instead of listing everything; "
+        "match the emojis to the food.\n" if item else "")
     executor.invoke({
+        "menu_note": menu_note,
         "team": TEAM_NAME, "kind": kind, "vibe": VIBE, "angle": random.choice(ANGLES),
         "today": now.strftime("%A, %d %B"), "now": now.strftime("%I:%M %p"),
     })

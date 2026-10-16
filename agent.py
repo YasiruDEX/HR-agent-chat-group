@@ -37,6 +37,17 @@ COMMUTE_WEBHOOK_URL = os.getenv("COMMUTE_WEBHOOK_URL", "")
 COMMUTE_TIMES = os.getenv("COMMUTE_TIMES", "13:30")
 COMMUTE_MESSAGE = os.getenv("COMMUTE_MESSAGE", "🚗 Don't forget to book the commute!")
 
+# Morning menu preview to the main group (fixed format, straight from the sheet).
+MENU_PREVIEW_TIMES = os.getenv("MENU_PREVIEW_TIMES", "09:30")
+
+# Weather check for the commute reminder (Open-Meteo, free, no key). Defaults to Colombo.
+WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "true").lower() == "true"
+WEATHER_LAT = float(os.getenv("WEATHER_LAT", "6.9271"))
+WEATHER_LON = float(os.getenv("WEATHER_LON", "79.8612"))
+WEATHER_FROM_HOUR = int(os.getenv("WEATHER_FROM_HOUR", "16"))  # evening commute window start
+WEATHER_TO_HOUR = int(os.getenv("WEATHER_TO_HOUR", "20"))      # window end (exclusive)
+RAIN_THRESHOLD = int(os.getenv("RAIN_THRESHOLD", "50"))        # % chance that counts as "rain expected"
+
 # Never send scheduled break messages on Saturday/Sunday, regardless of SCHEDULE_DAYS.
 SKIP_WEEKENDS = os.getenv("SKIP_WEEKENDS", "true").lower() == "true"
 ALLOW_STATIC_FALLBACK = os.getenv("ALLOW_STATIC_FALLBACK", "false").lower() == "true"
@@ -250,15 +261,83 @@ def scheduled_break(kind: str) -> None:
     run_break(kind)
 
 
-def scheduled_commute() -> None:
-    """Scheduler entrypoint for the commute reminder (separate webhook, weekdays only)."""
-    if SKIP_WEEKENDS and datetime.now(ZoneInfo(TIMEZONE)).weekday() >= 5:
-        log.info("Weekend; skipping commute reminder")
-        return
-    resp = requests.post(COMMUTE_WEBHOOK_URL, json={"text": COMMUTE_MESSAGE},
+def _is_weekend() -> bool:
+    return SKIP_WEEKENDS and datetime.now(ZoneInfo(TIMEZONE)).weekday() >= 5
+
+
+def _post(url: str, text: str) -> str:
+    resp = requests.post(url, json={"text": text},
                          headers={"Content-Type": "application/json; charset=UTF-8"}, timeout=15)
     resp.raise_for_status()
-    log.info("Commute reminder posted (HTTP %s)", resp.status_code)
+    return f"Posted (HTTP {resp.status_code})"
+
+
+def menu_preview_text():
+    """Today's menu as a clear fixed-format message, or None if the sheet has nothing for today."""
+    lunch, tea = get_today_menu("lunch"), get_today_menu("tea")
+    if not (lunch or tea):
+        return None
+    lines = [f"🍽️ *Today's menu, {TEAM_NAME}*", ""]
+    if lunch:
+        lines.append(f"🍛 *Lunch:* {lunch}")
+    if tea:
+        lines.append(f"☕ *Tea:* {tea}")
+    lines += ["", "_Plan ahead before ordering outside._"]
+    return "\n".join(lines)
+
+
+def scheduled_menu_preview() -> None:
+    if _is_weekend():
+        return
+    text = menu_preview_text()
+    if not text:
+        log.info("No menu in the sheet for today; skipping morning preview")
+        return
+    log.info("Menu preview: %s", _post(WEBHOOK_URL, text))
+
+
+def _fmt_hour(h: int) -> str:
+    return f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}"
+
+
+def commute_weather_note():
+    """One line about rain in the evening commute window, or None if weather is unavailable."""
+    if not WEATHER_ENABLED:
+        return None
+    try:
+        r = requests.get("https://api.open-meteo.com/v1/forecast", timeout=15, params={
+            "latitude": WEATHER_LAT, "longitude": WEATHER_LON, "timezone": TIMEZONE,
+            "hourly": "precipitation_probability,precipitation", "forecast_days": 1})
+        r.raise_for_status()
+        hourly = r.json()["hourly"]
+        window = [(int(t[11:13]), p or 0, mm or 0) for t, p, mm in zip(
+            hourly["time"], hourly["precipitation_probability"], hourly["precipitation"])
+            if WEATHER_FROM_HOUR <= int(t[11:13]) < WEATHER_TO_HOUR]
+    except Exception:
+        log.exception("Weather lookup failed; sending reminder without weather")
+        return None
+    if not window:
+        return None
+    wet = [(h, p) for h, p, _ in window if p >= RAIN_THRESHOLD]
+    span = f"{_fmt_hour(WEATHER_FROM_HOUR)}–{_fmt_hour(WEATHER_TO_HOUR)}"
+    if wet:
+        start, peak = wet[0][0], max(p for _, p in wet)
+        return f"🌧️ Rain expected from {_fmt_hour(start)} ({peak}% chance). Book the commute early!"
+    peak = max(p for _, p, _ in window)
+    return f"🌤️ Looks dry for the evening commute ({span}, max {peak}% chance of rain)."
+
+
+def commute_message() -> str:
+    note = commute_weather_note()
+    return f"{COMMUTE_MESSAGE}\n{note}" if note else COMMUTE_MESSAGE
+
+
+def scheduled_commute() -> None:
+    """Scheduler entrypoint for the commute reminder (separate webhook, weekdays only)."""
+    if _is_weekend():
+        log.info("Weekend; skipping commute reminder")
+        return
+    log.info("Commute reminder: %s", _post(COMMUTE_WEBHOOK_URL, commute_message()))
 
 
 def parse_time(value: str):
@@ -290,6 +369,16 @@ def schedule(background: bool = False):
                                                  minute=minute, timezone=TIMEZONE),
                           args=[kind], id=f"{kind}-{t}", misfire_grace_time=300)
             log.info("Scheduled %s at %02d:%02d (%s, %s)", kind, hour, minute, SCHEDULE_DAYS, TIMEZONE)
+    for t in filter(None, (x.strip() for x in MENU_PREVIEW_TIMES.split(","))):
+        try:
+            hour, minute = parse_time(t)
+        except ValueError as e:
+            log.error("Skipping menu preview schedule: %s", e)
+            continue
+        sched.add_job(scheduled_menu_preview, CronTrigger(day_of_week="mon-fri", hour=hour,
+                                                          minute=minute, timezone=TIMEZONE),
+                      id=f"menu-{t}", misfire_grace_time=300)
+        log.info("Scheduled menu preview at %02d:%02d (mon-fri, %s)", hour, minute, TIMEZONE)
     if COMMUTE_WEBHOOK_URL:
         for t in filter(None, (x.strip() for x in COMMUTE_TIMES.split(","))):
             try:
@@ -309,8 +398,18 @@ def schedule(background: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--now", choices=["lunch", "tea"], help="send one message immediately and exit")
+    parser.add_argument("--now", choices=["lunch", "tea", "menu", "commute"], help="send one message immediately and exit")
     args = parser.parse_args()
     if not WEBHOOK_URL:
         raise SystemExit("GOOGLE_CHAT_WEBHOOK_URL is not set")
-    run_break(args.now) if args.now else schedule()
+    if args.now == "menu":
+        scheduled_menu_preview()
+    elif args.now == "commute":
+        if not COMMUTE_WEBHOOK_URL:
+            raise SystemExit("COMMUTE_WEBHOOK_URL is not set")
+        log.info("Sending: %r", commute_message())
+        scheduled_commute()
+    elif args.now:
+        run_break(args.now)
+    else:
+        schedule()

@@ -3,6 +3,7 @@ import argparse
 import logging
 import os
 import random
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,13 @@ SCHEDULE_DAYS = os.getenv("SCHEDULE_DAYS", "mon-fri")
 VIBE = os.getenv("VIBE", "casual, dry and witty like a dev teammate, generous with food emojis")
 TEAM_NAME = os.getenv("TEAM_NAME", "Agent Manager Team")
 # Static messages are only used if explicitly enabled; by default every message is AI-generated.
+# Commute reminder: a separate group, posted only by the scheduler (never from /chat).
+COMMUTE_WEBHOOK_URL = os.getenv("COMMUTE_WEBHOOK_URL", "")
+COMMUTE_TIMES = os.getenv("COMMUTE_TIMES", "13:30")
+COMMUTE_MESSAGE = os.getenv("COMMUTE_MESSAGE", "🚗 Don't forget to book the commute!")
+
+# Never send scheduled break messages on Saturday/Sunday, regardless of SCHEDULE_DAYS.
+SKIP_WEEKENDS = os.getenv("SKIP_WEEKENDS", "true").lower() == "true"
 ALLOW_STATIC_FALLBACK = os.getenv("ALLOW_STATIC_FALLBACK", "false").lower() == "true"
 
 # GIFs attached to break messages. Override with comma-separated URLs in LUNCH_GIF_URLS / TEA_GIF_URLS,
@@ -173,15 +181,67 @@ def run_break(kind: str) -> None:
     log.info(post_to_google_chat(random.choice(FALLBACKS[kind]).format(team=TEAM_NAME), pick_gif(kind)))
 
 
+def scheduled_break(kind: str) -> None:
+    """Scheduler entrypoint: skips weekends, then sends the break message."""
+    if SKIP_WEEKENDS and datetime.now(ZoneInfo(TIMEZONE)).weekday() >= 5:
+        log.info("Weekend; skipping scheduled %s message", kind)
+        return
+    run_break(kind)
+
+
+def scheduled_commute() -> None:
+    """Scheduler entrypoint for the commute reminder (separate webhook, weekdays only)."""
+    if SKIP_WEEKENDS and datetime.now(ZoneInfo(TIMEZONE)).weekday() >= 5:
+        log.info("Weekend; skipping commute reminder")
+        return
+    resp = requests.post(COMMUTE_WEBHOOK_URL, json={"text": COMMUTE_MESSAGE},
+                         headers={"Content-Type": "application/json; charset=UTF-8"}, timeout=15)
+    resp.raise_for_status()
+    log.info("Commute reminder posted (HTTP %s)", resp.status_code)
+
+
+def parse_time(value: str):
+    """Parse '12:30', '12.30', '1230', '12:30 PM', '3.30pm', '15' -> (hour, minute)."""
+    m = re.fullmatch(r"\s*(\d{1,2})(?:[:.\s]?(\d{2}))?\s*([ap]\.?m\.?)?\s*", value, re.I)
+    if not m:
+        raise ValueError(f"invalid time {value!r} (use HH:MM, e.g. 12:30 or 15:30)")
+    hour, minute = int(m.group(1)), int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower().replace(".", "")
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        raise ValueError(f"invalid time {value!r} (use HH:MM, e.g. 12:30 or 15:30)")
+    return hour, minute
+
+
 def schedule(background: bool = False):
     sched = (BackgroundScheduler if background else BlockingScheduler)(timezone=TIMEZONE)
     for kind, times in (("lunch", LUNCH_TIMES), ("tea", TEA_TIMES)):
         for t in filter(None, (x.strip() for x in times.split(","))):
-            hour, minute = t.split(":")
-            sched.add_job(run_break, CronTrigger(day_of_week=SCHEDULE_DAYS, hour=int(hour),
-                                                 minute=int(minute), timezone=TIMEZONE),
+            try:
+                hour, minute = parse_time(t)
+            except ValueError as e:
+                log.error("Skipping %s schedule: %s", kind, e)
+                continue
+            sched.add_job(scheduled_break, CronTrigger(day_of_week=SCHEDULE_DAYS, hour=hour,
+                                                 minute=minute, timezone=TIMEZONE),
                           args=[kind], id=f"{kind}-{t}", misfire_grace_time=300)
-            log.info("Scheduled %s at %s (%s, %s)", kind, t, SCHEDULE_DAYS, TIMEZONE)
+            log.info("Scheduled %s at %02d:%02d (%s, %s)", kind, hour, minute, SCHEDULE_DAYS, TIMEZONE)
+    if COMMUTE_WEBHOOK_URL:
+        for t in filter(None, (x.strip() for x in COMMUTE_TIMES.split(","))):
+            try:
+                hour, minute = parse_time(t)
+            except ValueError as e:
+                log.error("Skipping commute schedule: %s", e)
+                continue
+            sched.add_job(scheduled_commute, CronTrigger(day_of_week="mon-fri", hour=hour,
+                                                         minute=minute, timezone=TIMEZONE),
+                          id=f"commute-{t}", misfire_grace_time=300)
+            log.info("Scheduled commute reminder at %02d:%02d (mon-fri, %s)", hour, minute, TIMEZONE)
+    else:
+        log.warning("COMMUTE_WEBHOOK_URL not set; commute reminder disabled")
     sched.start()
     return sched
 

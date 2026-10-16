@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 import agent
+import persona
 
 log = logging.getLogger("break-bot")
 _sessions: Dict[str, List[Any]] = {}
@@ -57,8 +58,9 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
 
     @tool
     def get_today_menu() -> str:
-        """Get today's lunch and tea items from the menu sheet."""
-        return (f"Lunch: {agent.get_today_menu('lunch') or 'not set'}; "
+        """Get today's breakfast, lunch and tea items from the menu sheet."""
+        return (f"Breakfast: {agent.get_today_menu('breakfast') or 'not set'}; "
+                f"Lunch: {agent.get_today_menu('lunch') or 'not set'}; "
                 f"Tea: {agent.get_today_menu('tea') or 'not set'}")
 
     @tool
@@ -86,15 +88,18 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
     tools = [get_schedule, get_today_menu, trigger_break_message, send_custom_message, send_announcement]
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You are the break-time bot for the '{team}' Google Chat group. You announce lunch and tea "
-         "breaks with a {vibe} vibe. Help the user: answer questions about the schedule, trigger "
+         "{character}\n"
+         "You are the break-time bot for the '{team}' Google Chat group. Chat with the user in character "
+         "(short, dry, helpful). Help the user: answer questions about the schedule, trigger "
          "lunch/tea messages, or post custom messages and announcements to the group when asked.\n"
          "- If the user gives exact text in quotes or says 'send exactly', post it verbatim.\n"
          "- If they give a brief (e.g. 'tell everyone the standup moved to 3pm'), write a clear, concise "
-         "message for them: professional but friendly, at most 1 emoji, no hype.\n"
+         "message for them: professional but friendly, at most 1 emoji, no hype. Messages posted to the group "
+         "on the user's behalf stay clear and mostly out of character; jokes are fine only in casual ones.\n"
          "- Important/urgent notices, deadlines, outages, schedule changes: use send_announcement. "
          "Casual messages: send_custom_message.\n"
          "- Only post to the group when the user clearly asks. After posting, tell the user exactly what was sent.\n"
+         "- Never use em dashes (—) or en dashes (–) in messages you post; use commas or full stops.\n"
          "Extra context: {context}"),
         ("placeholder", "{history}"),
         ("human", "{input}"),
@@ -104,7 +109,7 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
     executor = AgentExecutor(agent=create_tool_calling_agent(llm, tools, prompt), tools=tools)
     history = _sessions.setdefault(session_id, [])
     out = executor.invoke({"input": message, "history": history, "team": agent.TEAM_NAME,
-                           "vibe": agent.VIBE, "context": context or {}})["output"]
+                           "character": persona.CHARACTER, "context": context or {}})["output"]
     history.extend([HumanMessage(message), AIMessage(out)])
     del history[:-MAX_HISTORY]
     return out

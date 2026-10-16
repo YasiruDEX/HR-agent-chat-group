@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,8 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 load_dotenv()
+
+import persona  # noqa: E402  (reads env after load_dotenv)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("break-bot")
 
@@ -38,7 +41,10 @@ COMMUTE_TIMES = os.getenv("COMMUTE_TIMES", "13:30")
 COMMUTE_MESSAGE = os.getenv("COMMUTE_MESSAGE", "🚗 Don't forget to book the commute!")
 
 # Morning menu preview to the main group (fixed format, straight from the sheet).
-MENU_PREVIEW_TIMES = os.getenv("MENU_PREVIEW_TIMES", "09:30")
+MORNING_TIMES = os.getenv("MORNING_TIMES", os.getenv("MENU_PREVIEW_TIMES", "09:30"))
+# Friday "don't rush home" nudge and Monday morning juice reminder (main group).
+FRIDAY_WINDDOWN_TIMES = os.getenv("FRIDAY_WINDDOWN_TIMES", "16:30")
+JUICE_TIMES = os.getenv("JUICE_TIMES", "09:55")
 
 # Weather check for the commute reminder (Open-Meteo, free, no key). Defaults to Colombo.
 WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "true").lower() == "true"
@@ -63,16 +69,6 @@ DEFAULT_GIFS = {
 }
 GIFS = {k: [u.strip() for u in os.getenv(f"{k.upper()}_GIF_URLS", "").split(",") if u.strip()] or v
         for k, v in DEFAULT_GIFS.items()}
-
-# A random creative angle per message keeps the AI output fresh day to day.
-ANGLES = [
-    "a relatable dev joke (bugs, PRs, standups, deploys, meetings)",
-    "a deadpan observation about work life",
-    "a gentle nudge to step away from the screen",
-    "a small playful jab at the endless Slack/Chat pings",
-    "the food or drink itself as the hero",
-    "a nod to what day of the week it is",
-]
 
 FALLBACKS = {
     "lunch": [
@@ -104,30 +100,60 @@ def _parse_date(value: str):
     return None
 
 
+_menu_cache = {"at": 0.0, "rows": None}
+MENU_CACHE_SECONDS = 120
+
+
+def _menu_rows():
+    """Download the sheet once (cached briefly, retried on timeouts) and return its rows."""
+    if _menu_cache["rows"] is not None and time.time() - _menu_cache["at"] < MENU_CACHE_SECONDS:
+        return _menu_cache["rows"]
+    last_error = None
+    for attempt in range(3):
+        try:
+            r = requests.get(_menu_csv_url(MENU_SHEET_URL), timeout=(10, 30))
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            rows = [{(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+                    for row in csv.DictReader(io.StringIO(r.text))]
+            _menu_cache.update(at=time.time(), rows=rows)
+            return rows
+        except Exception as e:
+            last_error = e
+            log.warning("Menu sheet attempt %d failed: %s", attempt + 1, e)
+            time.sleep(2 * (attempt + 1))
+    log.error("Could not read menu sheet after 3 attempts: %s", last_error)
+    return None
+
+
 def get_today_menu(kind: str):
-    """Return today's lunch/tea item from the menu sheet, or None if unset/unavailable."""
+    """Return today's item for a column (breakfast/lunch/tea), or None if unset/unavailable."""
     if not MENU_SHEET_URL:
         return None
-    try:
-        r = requests.get(_menu_csv_url(MENU_SHEET_URL), timeout=15)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        today = datetime.now(ZoneInfo(TIMEZONE)).date()
-        for row in csv.DictReader(io.StringIO(r.text)):
-            row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
-            if _parse_date(row.get("date", "")) == today:
-                return row.get(kind) or None
-    except Exception:
-        log.exception("Could not read menu sheet")
+    rows = _menu_rows()
+    if not rows:
+        return None
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    for row in rows:
+        if _parse_date(row.get("date", "")) == today:
+            return row.get(kind) or None
     return None
 
 
 def with_menu(text: str, kind: str, item) -> str:
     """Append today's menu verbatim from the sheet so it's always shown exactly and clearly."""
-    if not item:
-        return text
-    icon = "🍽️" if kind == "lunch" else "☕"
-    return f"{text}\n\n{icon} *Today's {kind}:* {item}"
+    if item:
+        icon = "🍽️" if kind == "lunch" else "☕"
+        text = f"{text}\n\n{icon} *Today's {kind}:* {item}"
+    return persona.sign(text)
+
+
+def clean(text: str) -> str:
+    """Remove em/en dashes from outgoing messages (house style)."""
+    text = re.sub(r"(\d)\s*[–—]\s*(\d)", r"\1 to \2", text)           # 4–8 -> 4 to 8
+    text = re.sub(r"(AM|PM)\s*[–—]\s*", r"\1 to ", text)                # 4 PM–8 PM -> 4 PM to 8 PM
+    text = re.sub(r"\s*[—–]\s*", ", ", text)                             # any other dash -> comma
+    return re.sub(r"(^|\n), ", r"\1", text)                             # no leading commas
 
 
 def pick_gif(kind: str):
@@ -147,7 +173,7 @@ def pick_gif(kind: str):
 
 def post_to_google_chat(text: str, gif_url=None) -> str:
     """Send a text message (optionally with a GIF) to the configured Google Chat space."""
-    payload = {"text": text}
+    payload = {"text": clean(text)}
     if gif_url:
         payload["cardsV2"] = [{"cardId": "gif", "card": {"sections": [
             {"widgets": [{"image": {"imageUrl": gif_url, "altText": "GIF"}}]}]}}]
@@ -164,13 +190,14 @@ def post_to_google_chat(text: str, gif_url=None) -> str:
 def post_announcement(message: str, title: str = "Announcement", important: bool = False,
                       mention_all: bool = False) -> str:
     """Post a highlighted announcement card (optionally @all) to Google Chat."""
-    header = ("🚨 " if important else "📢 ") + title
+    header = clean(("🚨 " if important else "📢 ") + title)
+    message = clean(message)
     payload = {
         "text": "<users/all>" if mention_all else "",
         "cardsV2": [{
             "cardId": "announcement",
             "card": {
-                "header": {"title": header, "subtitle": TEAM_NAME},
+                "header": {"title": header, "subtitle": f"{TEAM_NAME} · via {persona.BOT_NAME}"},
                 "sections": [{"widgets": [{"textParagraph": {"text": message}}]}],
             },
         }],
@@ -196,23 +223,30 @@ def generate_with_agent(kind: str) -> None:
     @tool
     def send_google_chat_message(message: str) -> str:
         """Send the final message to the team's Google Chat space."""
-        return post_to_google_chat(with_menu(message, kind, item), pick_gif(kind))
+        result = post_to_google_chat(with_menu(message, kind, item), pick_gif(kind))
+        log.info("%s message: %s", kind.capitalize(), result)
+        persona.remember(kind, message)
+        return result
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You write break reminders for the '{team}' Google Chat group. "
-         "Write ONE {kind}-time message, 1-2 sentences, like a witty teammate would post it. "
-         "Vibe: {vibe}. Angle for this one: {angle}. Today is {today}.\n"
+         "{persona}\n\n"
+         "Task: write ONE {kind}-time reminder for the '{team}' Google Chat group, 1-2 sentences, in character. "
+         "Vibe: {vibe}. Today is {today}.\n"
+         "ANGLE (mandatory, commit to it fully; it's the whole joke): {angle}.\n"
          "Style rules:\n"
-         "- Use 3-4 food/drink emojis that fit the moment (lunch: 🍛🍜🍕🍔🌮🥗🍱🍗🥪🍝🍩, tea: ☕🫖🍪🧁🍰🥐🍵), "
+         "- Use 3-4 food/drink emojis that fit the moment (lunch: 🍛🍚🍗🥗🍱🥪, tea: ☕🫖🍪🧁🍰🥐🍵), "
          "e.g. a couple at the start and one or two at the end. Only food/drink emojis plus at most one face like 😄. "
-         "No bugs, rockets, stars, sparkles or party emojis.\n"
+         "No bugs, rockets, stars, sparkles, robots or party emojis.\n"
          "- Address the team exactly as '{team}'. Don't invent nicknames.\n"
          "- No hype words (epic, champions, brilliance, crush it, let's go, devour) and no exclamation spam.\n"
-         "- Dry, clever and grounded beats loud and cheesy.\n"
+         "- Don't sign the message; your sign-off is added automatically.\n"
+         "- Never use em dashes (—) or en dashes (–); use commas or full stops instead.\n"
+         "- Don't open with 'Attention' or 'It's lunchtime'; vary your openings. No filler like 'delightful' or 'bound to'.\n"
+         "- Pick a different dish to mention than your recent messages did, or none at all.\n"
          "Examples of the right tone:\n"
-         "- 🍛🍚 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 🍛😄\n"
-         "- ☕🍪 Tea time, Agent Manager Team. That PR isn't going to review itself, but it can definitely wait 15 minutes. 🫖\n"
+         "- 🍛🍚 [12:30] INCIDENT: Agent Manager Team hunger at 94%. Mitigation: rice and curry. Bugs will stay on-call. 🍗\n"
+         "- ☕🫖 Tea time, Agent Manager Team. I can't drink it, but I've read 4,000 reviews and they're positive. 🍪\n"
          "{menu_note}"
          "Write something new in that spirit; don't copy the examples. "
          "Call send_google_chat_message exactly once with the final message."),
@@ -231,7 +265,8 @@ def generate_with_agent(kind: str) -> None:
         "no 🍕 or 🍜 unless pizza or noodles are listed.\n" if item else "")
     executor.invoke({
         "menu_note": menu_note,
-        "team": TEAM_NAME, "kind": kind, "vibe": VIBE, "angle": random.choice(ANGLES),
+        "persona": persona.persona_brief(kind, now, item, weather_now()),
+        "team": TEAM_NAME, "kind": kind, "vibe": VIBE, "angle": random.choice(persona.ANGLES),
         "today": now.strftime("%A, %d %B"), "now": now.strftime("%I:%M %p"),
     })
 
@@ -266,34 +301,107 @@ def _is_weekend() -> bool:
 
 
 def _post(url: str, text: str) -> str:
-    resp = requests.post(url, json={"text": text},
+    resp = requests.post(url, json={"text": clean(text)},
                          headers={"Content-Type": "application/json; charset=UTF-8"}, timeout=15)
     resp.raise_for_status()
     return f"Posted (HTTP {resp.status_code})"
 
 
-def menu_preview_text():
-    """Today's menu as a clear fixed-format message, or None if the sheet has nothing for today."""
-    lunch, tea = get_today_menu("lunch"), get_today_menu("tea")
-    if not (lunch or tea):
-        return None
-    lines = [f"🍽️ *Today's menu, {TEAM_NAME}*", ""]
-    if lunch:
-        lines.append(f"🍛 *Lunch:* {lunch}")
-    if tea:
-        lines.append(f"☕ *Tea:* {tea}")
-    lines += ["", "_Plan ahead before ordering outside._"]
-    return "\n".join(lines)
+MENU_LINES = [("breakfast", "🍳", "Breakfast"), ("lunch", "🍛", "Lunch"), ("tea", "☕", "Tea")]
+
+# What AMEXA should write for each extra message (the menu itself is always added by code, verbatim).
+TASKS = {
+    "morning": ("the morning hello. Open by introducing yourself casually, like 'AMEXA here' plus a good morning "
+                "to the team, then one short warm/witty line to start the day. Keep it to 1-2 sentences. "
+                "Don't list the menu; it's added below your message automatically."),
+    "friday": ("the Friday 4:30 PM nudge: remind the team, in a funny way, not to rush home yet. It's still "
+               "work time, finish strong, close the laptop properly, push the commit, don't sprint to the "
+               "parking lot. 1-2 sentences, playful, never preachy."),
+    "juice": ("the Monday morning juice reminder: tell the team to grab their morning juice glass before it's "
+              "gone. 1-2 sentences, short and fun, use 1-2 juice/fruit emojis (🧃🍊🥭🍍🍉)."),
+}
+STATIC_TEXT = {
+    "morning": "☀️ AMEXA here. Good morning, {team}!",
+    "friday": "🏁 Easy there, {team}. It's only 4:30 on a Friday. Finish strong before you sprint home.",
+    "juice": "🧃 Morning, {team}! Don't forget to grab your juice glass before it's gone. 🍊",
+}
 
 
-def scheduled_menu_preview() -> None:
+def compose(kind: str) -> str:
+    """AMEXA writes a short in-character message for `kind` (morning/friday/juice)."""
+    if OPENAI_API_KEY:
+        try:
+            from langchain_core.prompts import ChatPromptTemplate
+            from langchain_openai import ChatOpenAI
+            now = datetime.now(ZoneInfo(TIMEZONE))
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "{persona}\n\nTask: write {task}\nTeam name: '{team}' (use it exactly). Today is {today}. "
+                           "Vibe: {vibe}. At most 3 emojis. No hype words, no exclamation spam, never use em or en "
+                           "dashes. Don't sign the message; your sign-off is added automatically. "
+                           "Reply with the message text only."),
+                ("human", "Write it now ({now})."),
+            ])
+            chain = prompt | ChatOpenAI(model=OPENAI_MODEL, api_key=OPENAI_API_KEY, temperature=1.0)
+            text = chain.invoke({
+                "persona": persona.persona_brief(kind, now), "task": TASKS[kind], "team": TEAM_NAME,
+                "today": now.strftime("%A, %d %B"), "vibe": VIBE, "now": now.strftime("%I:%M %p"),
+            }).content.strip().strip('"')
+            persona.remember(kind, text)
+            return text
+        except Exception:
+            log.exception("AI generation failed for %s", kind)
+    # The morning menu must always go out; the others follow ALLOW_STATIC_FALLBACK.
+    if kind != "morning" and not ALLOW_STATIC_FALLBACK:
+        raise RuntimeError(f"Could not generate {kind} message (set OPENAI_API_KEY)")
+    return STATIC_TEXT[kind].format(team=TEAM_NAME)
+
+
+def menu_block():
+    """Today's breakfast/lunch/tea, verbatim from the sheet, or None if nothing is set."""
+    lines = [f"{icon} *{label}:* {item}" for col, icon, label in MENU_LINES if (item := get_today_menu(col))]
+    return "\n".join([f"🍽️ *Today's menu*"] + lines) if lines else None
+
+
+def morning_text() -> str:
+    menu = menu_block()
+    text = compose("morning")
+    return persona.sign(f"{text}\n\n{menu}" if menu else text)
+
+
+def scheduled_morning() -> None:
     if _is_weekend():
         return
-    text = menu_preview_text()
-    if not text:
-        log.info("No menu in the sheet for today; skipping morning preview")
+    log.info("Morning message: %s", _post(WEBHOOK_URL, morning_text()))
+
+
+def scheduled_simple(kind: str) -> None:
+    """Friday wind-down / Monday juice: AI-written, signed, main group."""
+    if _is_weekend():
         return
-    log.info("Menu preview: %s", _post(WEBHOOK_URL, text))
+    log.info("%s message: %s", kind, _post(WEBHOOK_URL, persona.sign(compose(kind))))
+
+
+def weather_now():
+    """Short description of the next few hours' weather for the persona, or None."""
+    if not WEATHER_ENABLED:
+        return None
+    try:
+        r = requests.get("https://api.open-meteo.com/v1/forecast", timeout=10, params={
+            "latitude": WEATHER_LAT, "longitude": WEATHER_LON, "timezone": TIMEZONE,
+            "hourly": "precipitation_probability,temperature_2m", "forecast_days": 1})
+        r.raise_for_status()
+        h = r.json()["hourly"]
+        hour = datetime.now(ZoneInfo(TIMEZONE)).hour
+        rows = [(p or 0, t) for ts, p, t in zip(h["time"], h["precipitation_probability"], h["temperature_2m"])
+                if hour <= int(ts[11:13]) < hour + 3]
+        if not rows:
+            return None
+        rain, temp = max(p for p, _ in rows), rows[0][1]
+        sky = "rainy" if rain >= RAIN_THRESHOLD else "dry"
+        return f"{sky}, about {round(temp)}°C, {rain}% chance of rain in the next few hours"
+    except Exception:
+        log.warning("Weather lookup for persona failed", exc_info=True)
+        return None
 
 
 def _fmt_hour(h: int) -> str:
@@ -319,7 +427,7 @@ def commute_weather_note():
     if not window:
         return None
     wet = [(h, p) for h, p, _ in window if p >= RAIN_THRESHOLD]
-    span = f"{_fmt_hour(WEATHER_FROM_HOUR)}–{_fmt_hour(WEATHER_TO_HOUR)}"
+    span = f"{_fmt_hour(WEATHER_FROM_HOUR)} to {_fmt_hour(WEATHER_TO_HOUR)}"
     if wet:
         start, peak = wet[0][0], max(p for _, p in wet)
         return f"🌧️ Rain expected from {_fmt_hour(start)} ({peak}% chance). Book the commute early!"
@@ -329,7 +437,7 @@ def commute_weather_note():
 
 def commute_message() -> str:
     note = commute_weather_note()
-    return f"{COMMUTE_MESSAGE}\n{note}" if note else COMMUTE_MESSAGE
+    return persona.sign(f"{COMMUTE_MESSAGE}\n{note}" if note else COMMUTE_MESSAGE)
 
 
 def scheduled_commute() -> None:
@@ -369,16 +477,19 @@ def schedule(background: bool = False):
                                                  minute=minute, timezone=TIMEZONE),
                           args=[kind], id=f"{kind}-{t}", misfire_grace_time=300)
             log.info("Scheduled %s at %02d:%02d (%s, %s)", kind, hour, minute, SCHEDULE_DAYS, TIMEZONE)
-    for t in filter(None, (x.strip() for x in MENU_PREVIEW_TIMES.split(","))):
-        try:
-            hour, minute = parse_time(t)
-        except ValueError as e:
-            log.error("Skipping menu preview schedule: %s", e)
-            continue
-        sched.add_job(scheduled_menu_preview, CronTrigger(day_of_week="mon-fri", hour=hour,
-                                                          minute=minute, timezone=TIMEZONE),
-                      id=f"menu-{t}", misfire_grace_time=300)
-        log.info("Scheduled menu preview at %02d:%02d (mon-fri, %s)", hour, minute, TIMEZONE)
+    for func, times, days, args, label in (
+            (scheduled_morning, MORNING_TIMES, "mon-fri", [], "morning message"),
+            (scheduled_simple, FRIDAY_WINDDOWN_TIMES, "fri", ["friday"], "Friday wind-down"),
+            (scheduled_simple, JUICE_TIMES, "mon", ["juice"], "Monday juice reminder")):
+        for t in filter(None, (x.strip() for x in times.split(","))):
+            try:
+                hour, minute = parse_time(t)
+            except ValueError as e:
+                log.error("Skipping %s schedule: %s", label, e)
+                continue
+            sched.add_job(func, CronTrigger(day_of_week=days, hour=hour, minute=minute, timezone=TIMEZONE),
+                          args=args, id=f"{label}-{t}", misfire_grace_time=300)
+            log.info("Scheduled %s at %02d:%02d (%s, %s)", label, hour, minute, days, TIMEZONE)
     if COMMUTE_WEBHOOK_URL:
         for t in filter(None, (x.strip() for x in COMMUTE_TIMES.split(","))):
             try:
@@ -398,12 +509,14 @@ def schedule(background: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--now", choices=["lunch", "tea", "menu", "commute"], help="send one message immediately and exit")
+    parser.add_argument("--now", choices=["lunch", "tea", "morning", "friday", "juice", "commute"], help="send one message immediately and exit")
     args = parser.parse_args()
     if not WEBHOOK_URL:
         raise SystemExit("GOOGLE_CHAT_WEBHOOK_URL is not set")
-    if args.now == "menu":
-        scheduled_menu_preview()
+    if args.now == "morning":
+        log.info(_post(WEBHOOK_URL, morning_text()))
+    elif args.now in ("friday", "juice"):
+        log.info(_post(WEBHOOK_URL, persona.sign(compose(args.now))))
     elif args.now == "commute":
         if not COMMUTE_WEBHOOK_URL:
             raise SystemExit("COMMUTE_WEBHOOK_URL is not set")

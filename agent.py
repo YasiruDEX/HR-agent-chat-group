@@ -111,6 +111,14 @@ def get_today_menu(kind: str):
     return None
 
 
+def with_menu(text: str, kind: str, item) -> str:
+    """Append today's menu verbatim from the sheet so it's always shown exactly and clearly."""
+    if not item:
+        return text
+    icon = "🍽️" if kind == "lunch" else "☕"
+    return f"{text}\n\n{icon} *Today's {kind}:* {item}"
+
+
 def pick_gif(kind: str):
     """Return a GIF URL for this break, or None if GIFs are disabled."""
     if not SEND_GIF:
@@ -171,10 +179,13 @@ def generate_with_agent(kind: str) -> None:
     from langchain_core.tools import tool
     from langchain_openai import ChatOpenAI
 
+    item = get_today_menu(kind)
+    log.info("Today's %s menu: %s", kind, item or "(not set)")
+
     @tool
     def send_google_chat_message(message: str) -> str:
         """Send the final message to the team's Google Chat space."""
-        return post_to_google_chat(message, pick_gif(kind))
+        return post_to_google_chat(with_menu(message, kind, item), pick_gif(kind))
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
@@ -201,14 +212,12 @@ def generate_with_agent(kind: str) -> None:
     tools = [send_google_chat_message]
     executor = AgentExecutor(agent=create_tool_calling_agent(llm, tools, prompt), tools=tools)
     now = datetime.now(ZoneInfo(TIMEZONE))
-    item = get_today_menu(kind)
-    log.info("Today's %s menu: %s", kind, item or "(not set)")
     menu_note = (
-        f"Today's {kind} menu: {item}. Work it into the message naturally and make it sound tempting. "
-        "If it's a long list, highlight one or two standout dishes instead of listing everything; "
-        "Every food emoji must depict something actually on today's menu (e.g. rice/curry -> 🍛🍚, chicken -> 🍗, "
-        "fish -> 🐟, buns/bread -> 🍞🥯, vegetables -> 🥗🥦). Never use emojis for food that isn't on the menu, "
-        "e.g. no 🍕 or 🍜 unless pizza or noodles are listed.\n" if item else "")
+        f"Today's {kind} menu: {item}. The exact menu is automatically added on its own line below your "
+        "message, so do NOT list the menu or rename/paraphrase dishes. You may mention ONE dish by its exact "
+        "name from the menu to tease it. Every food emoji must depict something actually on today's menu "
+        "(rice/curry -> 🍛🍚, chicken -> 🍗, fish -> 🐟, buns/bread -> 🍞🥯, vegetables -> 🥗🥦); "
+        "no 🍕 or 🍜 unless pizza or noodles are listed.\n" if item else "")
     executor.invoke({
         "menu_note": menu_note,
         "team": TEAM_NAME, "kind": kind, "vibe": VIBE, "angle": random.choice(ANGLES),
@@ -229,7 +238,8 @@ def run_break(kind: str) -> None:
     if not ALLOW_STATIC_FALLBACK:
         raise RuntimeError(f"Could not generate {kind} message (set OPENAI_API_KEY)")
     log.warning("Sending static fallback message")
-    log.info(post_to_google_chat(random.choice(FALLBACKS[kind]).format(team=TEAM_NAME), pick_gif(kind)))
+    text = random.choice(FALLBACKS[kind]).format(team=TEAM_NAME)
+    log.info(post_to_google_chat(with_menu(text, kind, get_today_menu(kind)), pick_gif(kind)))
 
 
 def scheduled_break(kind: str) -> None:

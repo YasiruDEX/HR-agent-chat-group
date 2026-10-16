@@ -23,18 +23,19 @@ LUNCH_TIMES = os.getenv("LUNCH_TIMES", "12:30")
 TEA_TIMES = os.getenv("TEA_TIMES", "15:30")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Colombo")
 SCHEDULE_DAYS = os.getenv("SCHEDULE_DAYS", "mon-fri")
-VIBE = os.getenv("VIBE", "fun, upbeat, witty, with a sprinkle of emojis")
+VIBE = os.getenv("VIBE", "casual, dry and witty like a dev teammate, light on emojis")
 TEAM_NAME = os.getenv("TEAM_NAME", "Agent Manager Team")
 # Static messages are only used if explicitly enabled; by default every message is AI-generated.
 ALLOW_STATIC_FALLBACK = os.getenv("ALLOW_STATIC_FALLBACK", "false").lower() == "true"
 
 # A random creative angle per message keeps the AI output fresh day to day.
 ANGLES = [
-    "a movie-trailer voiceover", "a breaking-news bulletin", "a sports commentator",
-    "a pirate captain", "a tiny haiku plus a call to action", "a dramatic Shakespearean line",
-    "a sci-fi mission control announcement", "a nature documentary narrator",
-    "a fake system/deploy log", "a motivational coach", "a food critic",
-    "a weather forecast", "a mysterious secret-agent briefing", "a game level-up notification",
+    "a relatable dev joke (bugs, PRs, standups, deploys, meetings)",
+    "a deadpan observation about work life",
+    "a gentle nudge to step away from the screen",
+    "a small playful jab at the endless Slack/Chat pings",
+    "the food or drink itself as the hero",
+    "a nod to what day of the week it is",
 ]
 
 FALLBACKS = {
@@ -75,11 +76,19 @@ def generate_with_agent(kind: str) -> None:
 
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You are the break-time hype bot for the '{team}' Google Chat group. "
-         "Write ONE short, original, cool message (max ~3 lines) announcing {kind} time. "
-         "Vibe: {vibe}. Creative angle for this one: {angle}. Don't repeat cliches; today is {today}. "
-         "Google Chat supports *bold* and _italic_. "
-         "When ready, call send_google_chat_message exactly once with the message."),
+         "You write break reminders for the '{team}' Google Chat group. "
+         "Write ONE {kind}-time message, 1-2 sentences, like a witty teammate would post it. "
+         "Vibe: {vibe}. Angle for this one: {angle}. Today is {today}.\n"
+         "Style rules:\n"
+         "- At most 2 emojis: usually one at the start and optionally one at the end. Never more.\n"
+         "- Address the team exactly as '{team}'. Don't invent nicknames.\n"
+         "- No hype words (epic, champions, brilliance, crush it, let's go, devour) and no exclamation spam.\n"
+         "- Dry, clever and grounded beats loud and cheesy.\n"
+         "Examples of the right tone:\n"
+         "- 🍛 It's lunch o'clock, Agent Manager Team! Close those tabs, grab your plate, and refuel. The bugs will still be here in an hour. 😄\n"
+         "- ☕ Tea time, Agent Manager Team. That PR isn't going to review itself, but it can definitely wait 15 minutes.\n"
+         "Write something new in that spirit; don't copy the examples. "
+         "Call send_google_chat_message exactly once with the final message."),
         ("human", "It's {kind} time now ({now}). Compose and send the message."),
         ("placeholder", "{agent_scratchpad}"),
     ])

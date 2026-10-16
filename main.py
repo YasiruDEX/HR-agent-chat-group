@@ -68,13 +68,28 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
         """Post a custom message (exact text) to the team's Google Chat space."""
         return agent.post_to_google_chat(message)
 
-    tools = [get_schedule, trigger_break_message, send_custom_message]
+    @tool
+    def send_announcement(message: str, title: str = "Announcement", important: bool = False,
+                          mention_all: bool = False) -> str:
+        """Post an important announcement to the team as a highlighted card.
+        message: the body (Google Chat supports <b>bold</b>, <i>italic</i>, <br> in cards).
+        title: short headline. important: true for urgent/critical notices.
+        mention_all: true to @mention everyone (only if the user asks or it's urgent)."""
+        return agent.post_announcement(message, title, important, mention_all)
+
+    tools = [get_schedule, trigger_break_message, send_custom_message, send_announcement]
     prompt = ChatPromptTemplate.from_messages([
         ("system",
          "You are the break-time bot for the '{team}' Google Chat group. You announce lunch and tea "
          "breaks with a {vibe} vibe. Help the user: answer questions about the schedule, trigger "
-         "lunch/tea messages, or post custom messages to the group when asked. Only post to the group "
-         "when the user clearly asks. Extra context: {context}"),
+         "lunch/tea messages, or post custom messages and announcements to the group when asked.\n"
+         "- If the user gives exact text in quotes or says 'send exactly', post it verbatim.\n"
+         "- If they give a brief (e.g. 'tell everyone the standup moved to 3pm'), write a clear, concise "
+         "message for them: professional but friendly, at most 1 emoji, no hype.\n"
+         "- Important/urgent notices, deadlines, outages, schedule changes: use send_announcement. "
+         "Casual messages: send_custom_message.\n"
+         "- Only post to the group when the user clearly asks. After posting, tell the user exactly what was sent.\n"
+         "Extra context: {context}"),
         ("placeholder", "{history}"),
         ("human", "{input}"),
         ("placeholder", "{agent_scratchpad}"),
@@ -96,11 +111,15 @@ def chat_without_llm(message: str) -> str:
         if kind in text and any(w in text for w in ("send", "trigger", "post", "now")):
             agent.run_break(kind)
             return f"Posted a {kind} message to the group ✅"
+    for prefix, important in (("urgent:", True), ("announce:", False)):
+        if text.startswith(prefix):
+            agent.post_announcement(message[len(prefix):].strip(), important=important)
+            return "Posted the announcement to the group ✅"
     if text.startswith("say "):
         agent.post_to_google_chat(message[4:])
         return "Posted your message to the group ✅"
     return ("OPENAI_API_KEY isn't set, so I'm in basic mode. Try 'send lunch now', "
-            "'send tea now', or 'say <message>'. " + schedule_summary())
+            "'send tea now', 'say <message>', 'announce: <message>' or 'urgent: <message>'. " + schedule_summary())
 
 
 @app.post("/chat", response_model=ChatResponse)

@@ -62,6 +62,28 @@ def post_to_google_chat(text: str) -> str:
     return f"Posted (HTTP {resp.status_code})"
 
 
+def post_announcement(message: str, title: str = "Announcement", important: bool = False,
+                      mention_all: bool = False) -> str:
+    """Post a highlighted announcement card (optionally @all) to Google Chat."""
+    header = ("🚨 " if important else "📢 ") + title
+    payload = {
+        "text": "<users/all>" if mention_all else "",
+        "cardsV2": [{
+            "cardId": "announcement",
+            "card": {
+                "header": {"title": header, "subtitle": TEAM_NAME},
+                "sections": [{"widgets": [{"textParagraph": {"text": message}}]}],
+            },
+        }],
+    }
+    if not payload["text"]:
+        del payload["text"]
+    resp = requests.post(WEBHOOK_URL, json=payload,
+                         headers={"Content-Type": "application/json; charset=UTF-8"}, timeout=15)
+    resp.raise_for_status()
+    return f"Announcement posted (HTTP {resp.status_code})"
+
+
 def generate_with_agent(kind: str) -> None:
     """Let a LangChain tool-calling agent compose and send the message."""
     from langchain.agents import AgentExecutor, create_tool_calling_agent

@@ -9,7 +9,7 @@ from datetime import datetime
 log = logging.getLogger("break-bot")
 
 BOT_NAME = os.getenv("BOT_NAME", "AMEXA")
-SIGN_OFF = os.getenv("SIGN_OFF", f"~ {BOT_NAME} ☕")
+SIGN_OFF = os.getenv("SIGN_OFF", "")  # no name shown in messages by default
 MEMORY_FILE = os.getenv("MEMORY_FILE", "amexa_memory.json")
 MEMORY_SIZE = 15
 LOCAL_FLAVOUR_CHANCE = 0.3  # share of messages that get one word of Sri Lankan English
@@ -17,7 +17,7 @@ LOCAL_FLAVOUR_CHANCE = 0.3  # share of messages that get one word of Sri Lankan 
 CHARACTER = f"""You are {BOT_NAME}, the friendly office colleague in the HR team who keeps everyone fed, caffeinated and on time.
 - Warm but dry-witted; you tease the devs about PRs, standups, flaky tests and prod, like a colleague who sits near them.
 - You are a person, not a bot: never mention being a bot, AI or server.
-- You have firm food opinions and bring them up when relevant. Short sentences, one good joke.
+- You have firm food opinions and bring them up when relevant. Very short messages: one short sentence, max 10 words.
 - You remember what you've said recently and never repeat a joke; sometimes you call back to an earlier one."""
 
 # Firm opinions, mentioned when the dish appears on today's menu.

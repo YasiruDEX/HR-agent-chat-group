@@ -448,6 +448,16 @@ def scheduled_commute() -> None:
     log.info("Commute reminder: %s", _post(COMMUTE_WEBHOOK_URL, commute_message()))
 
 
+OFF_VALUES = {"off", "none", "disabled", "false", "no", "-"}
+
+
+def time_list(value: str) -> list:
+    """Split a comma-separated times setting; empty or 'off' disables it."""
+    if (value or "").strip().lower() in OFF_VALUES:
+        return []
+    return [t.strip() for t in (value or "").split(",") if t.strip()]
+
+
 def parse_time(value: str):
     """Parse '12:30', '12.30', '1230', '12:30 PM', '3.30pm', '15' -> (hour, minute)."""
     m = re.fullmatch(r"\s*(\d{1,2})(?:[:.\s]?(\d{2}))?\s*([ap]\.?m\.?)?\s*", value, re.I)
@@ -467,7 +477,7 @@ def parse_time(value: str):
 def schedule(background: bool = False):
     sched = (BackgroundScheduler if background else BlockingScheduler)(timezone=TIMEZONE)
     for kind, times in (("lunch", LUNCH_TIMES), ("tea", TEA_TIMES)):
-        for t in filter(None, (x.strip() for x in times.split(","))):
+        for t in time_list(times):
             try:
                 hour, minute = parse_time(t)
             except ValueError as e:
@@ -481,7 +491,7 @@ def schedule(background: bool = False):
             (scheduled_morning, MORNING_TIMES, "mon-fri", [], "morning message"),
             (scheduled_simple, FRIDAY_WINDDOWN_TIMES, "fri", ["friday"], "Friday wind-down"),
             (scheduled_simple, JUICE_TIMES, "mon", ["juice"], "Monday juice reminder")):
-        for t in filter(None, (x.strip() for x in times.split(","))):
+        for t in time_list(times):
             try:
                 hour, minute = parse_time(t)
             except ValueError as e:
@@ -491,7 +501,7 @@ def schedule(background: bool = False):
                           args=args, id=f"{label}-{t}", misfire_grace_time=300)
             log.info("Scheduled %s at %02d:%02d (%s, %s)", label, hour, minute, days, TIMEZONE)
     if COMMUTE_WEBHOOK_URL:
-        for t in filter(None, (x.strip() for x in COMMUTE_TIMES.split(","))):
+        for t in time_list(COMMUTE_TIMES):
             try:
                 hour, minute = parse_time(t)
             except ValueError as e:

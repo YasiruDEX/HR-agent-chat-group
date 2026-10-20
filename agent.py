@@ -23,8 +23,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("break-bot")
 
 WEBHOOK_URL = os.getenv("GOOGLE_CHAT_WEBHOOK_URL", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# LLM: OpenAI or any OpenAI-compatible provider. A Groq key (gsk_...) is detected automatically.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "") or os.getenv("GROQ_API_KEY", "")
+IS_GROQ = OPENAI_API_KEY.startswith("gsk_")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1" if IS_GROQ else "") or None
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openai/gpt-oss-120b" if IS_GROQ else "gpt-4o-mini")
+
+
+def make_llm(**kwargs):
+    """Chat model for the configured provider (OpenAI by default, Groq if a gsk_ key is set)."""
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(model=OPENAI_MODEL, api_key=OPENAI_API_KEY, base_url=LLM_BASE_URL, **kwargs)
 LUNCH_TIMES = os.getenv("LUNCH_TIMES", "12:30")
 TEA_TIMES = os.getenv("TEA_TIMES", "15:30")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Colombo")
@@ -290,7 +299,7 @@ def generate_with_agent(kind: str) -> None:
         ("human", "It's {kind} time now ({now}). Compose and send the message."),
         ("placeholder", "{agent_scratchpad}"),
     ])
-    llm = ChatOpenAI(model=OPENAI_MODEL, api_key=OPENAI_API_KEY, temperature=1.0)
+    llm = make_llm(temperature=1.0)
     tools = [send_google_chat_message]
     executor = AgentExecutor(agent=create_tool_calling_agent(llm, tools, prompt), tools=tools,
                              max_iterations=3)
@@ -379,7 +388,7 @@ def compose(kind: str) -> str:
                            "Reply with the message text only."),
                 ("human", "Write it now ({now})."),
             ])
-            chain = prompt | ChatOpenAI(model=OPENAI_MODEL, api_key=OPENAI_API_KEY, temperature=1.0)
+            chain = prompt | make_llm(temperature=1.0)
             text = chain.invoke({
                 "persona": persona.persona_brief(kind, now), "task": TASKS[kind], "team": TEAM_NAME,
                 "today": now.strftime("%A, %d %B"), "vibe": VIBE, "now": now.strftime("%I:%M %p"),

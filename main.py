@@ -100,12 +100,13 @@ def chat_with_agent(message: str, session_id: str, context: Optional[Dict[str, A
          "Casual messages: send_custom_message.\n"
          "- Only post to the group when the user clearly asks. After posting, tell the user exactly what was sent.\n"
          "- Never use em dashes (—) or en dashes (–) in messages you post; use commas or full stops.\n"
+         "- When asked about the menu, call get_today_menu and quote the items exactly as returned; never shorten or rename dishes.\n"
          "Extra context: {context}"),
         ("placeholder", "{history}"),
         ("human", "{input}"),
         ("placeholder", "{agent_scratchpad}"),
     ])
-    llm = ChatOpenAI(model=agent.OPENAI_MODEL, api_key=agent.OPENAI_API_KEY)
+    llm = agent.make_llm()
     executor = AgentExecutor(agent=create_tool_calling_agent(llm, tools, prompt), tools=tools)
     history = _sessions.setdefault(session_id, [])
     out = executor.invoke({"input": message, "history": history, "team": agent.TEAM_NAME,

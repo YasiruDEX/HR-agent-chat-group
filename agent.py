@@ -54,7 +54,8 @@ COMMUTE_MESSAGE = os.getenv("COMMUTE_MESSAGE", "🚗 Don't forget to book the co
 MORNING_TIMES = os.getenv("MORNING_TIMES", "off")
 # Friday "don't rush home" nudge and Monday morning juice reminder (main group).
 FRIDAY_WINDDOWN_TIMES = os.getenv("FRIDAY_WINDDOWN_TIMES", "16:30")
-JUICE_TIMES = os.getenv("JUICE_TIMES", "off")
+# Juice reminder: weekdays, only when the sheet has a juice for today.
+JUICE_TIMES = os.getenv("JUICE_TIMES", "09:55")
 
 # Weather check for the commute reminder (Open-Meteo, free, no key). Defaults to Colombo.
 WEATHER_ENABLED = os.getenv("WEATHER_ENABLED", "true").lower() == "true"
@@ -364,17 +365,19 @@ TASKS = {
                "work time, finish strong, close the laptop properly, push the commit, don't sprint to the "
                "parking lot. ONE very short sentence, max 10 words, playful, never preachy. "
                "Do not mention any food or drink at all."),
-    "juice": ("the Monday morning juice reminder: tell the team to grab their morning juice glass before it's "
-              "gone. 1-2 sentences, short and fun, use 1-2 juice/fruit emojis (🧃🍊🥭🍍🍉)."),
+    "juice": ("the juice-time reminder: tell the team to grab their juice glass before it's gone. Today's juice "
+              "is: {item}. You may mention it by that exact name; don't name any other food or drink. "
+              "ONE very short sentence, max 10 words. Start with 🧃 and no other emojis. "
+              "The juice name is added below your message automatically."),
 }
 STATIC_TEXT = {
     "morning": "☀️ AMEXA here. Good morning, {team}!",
     "friday": "🏁 Easy there, {team}. It's only 4:30 on a Friday. Finish strong before you sprint home.",
-    "juice": "🧃 Morning, {team}! Don't forget to grab your juice glass before it's gone. 🍊",
+    "juice": "🧃 Juice time, {team}. Grab your glass before it's gone.",
 }
 
 
-def compose(kind: str) -> str:
+def compose(kind: str, item: str = "") -> str:
     """AMEXA writes a short in-character message for `kind` (morning/friday/juice)."""
     if OPENAI_API_KEY:
         try:
@@ -390,10 +393,11 @@ def compose(kind: str) -> str:
             ])
             chain = prompt | make_llm(temperature=1.0)
             text = chain.invoke({
-                "persona": persona.persona_brief(kind, now), "task": TASKS[kind], "team": TEAM_NAME,
+                "persona": persona.persona_brief(kind, now), "task": TASKS[kind].replace("{item}", item),
+                "team": TEAM_NAME,
                 "today": now.strftime("%A, %d %B"), "vibe": VIBE, "now": now.strftime("%I:%M %p"),
             }).content.strip().strip('"')
-            text = strip_offmenu_emojis(text, [] if kind == "friday" else list("🧃🍊🥭🍍🍉"))
+            text = strip_offmenu_emojis(text, [] if kind == "friday" else ["🧃"])
             persona.remember(kind, text)
             return text
         except Exception:
@@ -420,6 +424,24 @@ def scheduled_morning() -> None:
     if _is_weekend():
         return
     log.info("Morning message: %s", _post(WEBHOOK_URL, morning_text()))
+
+
+def juice_text():
+    """Juice reminder with today's juice from the sheet, or None if no juice today."""
+    item = get_today_menu("juice")
+    if not item:
+        return None
+    return persona.sign(f"{compose('juice', item)}\n\n🧃 *Today's juice:* {item}")
+
+
+def scheduled_juice() -> None:
+    if _is_weekend():
+        return
+    text = juice_text()
+    if not text:
+        log.info("No juice in the sheet for today; skipping juice reminder")
+        return
+    log.info("Juice message: %s", _post(WEBHOOK_URL, text))
 
 
 def scheduled_simple(kind: str) -> None:
@@ -544,7 +566,7 @@ def schedule(background: bool = False):
     for func, times, days, args, label in (
             (scheduled_morning, MORNING_TIMES, "mon-fri", [], "morning message"),
             (scheduled_simple, FRIDAY_WINDDOWN_TIMES, "fri", ["friday"], "Friday wind-down"),
-            (scheduled_simple, JUICE_TIMES, "mon", ["juice"], "Monday juice reminder")):
+            (scheduled_juice, JUICE_TIMES, "mon-fri", [], "juice reminder")):
         for t in time_list(times):
             try:
                 hour, minute = parse_time(t)
@@ -579,7 +601,10 @@ if __name__ == "__main__":
         raise SystemExit("GOOGLE_CHAT_WEBHOOK_URL is not set")
     if args.now == "morning":
         log.info(_post(WEBHOOK_URL, morning_text()))
-    elif args.now in ("friday", "juice"):
+    elif args.now == "juice":
+        text = juice_text()
+        log.info(_post(WEBHOOK_URL, text) if text else "No juice in the sheet for today; nothing sent")
+    elif args.now == "friday":
         log.info(_post(WEBHOOK_URL, persona.sign(compose(args.now))))
     elif args.now == "commute":
         if not COMMUTE_WEBHOOK_URL:

@@ -50,8 +50,8 @@ COMMUTE_TIMES = os.getenv("COMMUTE_TIMES", "13:30")
 COMMUTE_MESSAGE = os.getenv("COMMUTE_MESSAGE", "🚗 Don't forget to book the commute!")
 
 # Morning menu preview to the main group (fixed format, straight from the sheet).
-# Morning hello and Monday juice reminder are off by default (team feedback); set a time to re-enable.
-MORNING_TIMES = os.getenv("MORNING_TIMES", "off")
+# Morning hello + today's menu (mon-fri). Set MORNING_TIMES=off to disable.
+MORNING_TIMES = os.getenv("MORNING_TIMES", "09:30")
 # Friday "don't rush home" nudge and Monday morning juice reminder (main group).
 FRIDAY_WINDDOWN_TIMES = os.getenv("FRIDAY_WINDDOWN_TIMES", "16:30")
 # Juice reminder: weekdays, only when the sheet has a juice for today.
@@ -359,7 +359,8 @@ MENU_LINES = [("breakfast", "🍳", "Breakfast"), ("lunch", "🍛", "Lunch"), ("
 # What AMEXA should write for each extra message (the menu itself is always added by code, verbatim).
 TASKS = {
     "morning": ("the morning hello. Open by introducing yourself casually, like 'AMEXA here' plus a good morning "
-                "to the team, then one short warm/witty line to start the day. Keep it to 1-2 sentences. "
+                "to the team, then a few words to start the day. ONE short sentence, max 15 words. "
+                "Never name any food or drink. "
                 "Don't list the menu; it's added below your message automatically."),
     "friday": ("the Friday 4:30 PM nudge: remind the team, in a funny way, not to rush home yet. It's still "
                "work time, finish strong, close the laptop properly, push the commit, don't sprint to the "
@@ -550,7 +551,18 @@ def parse_time(value: str):
     return hour, minute
 
 
+def log_llm_config() -> None:
+    """Say which LLM provider/model is in use (key never logged), so misconfiguration is obvious."""
+    if not OPENAI_API_KEY:
+        log.warning("LLM: no API key set; AI messages are disabled")
+        return
+    provider = "Groq" if IS_GROQ else ("custom endpoint" if LLM_BASE_URL else "OpenAI")
+    log.info("LLM: %s, model %s, endpoint %s, key %s...", provider, OPENAI_MODEL,
+             LLM_BASE_URL or "https://api.openai.com/v1", OPENAI_API_KEY[:4])
+
+
 def schedule(background: bool = False):
+    log_llm_config()
     sched = (BackgroundScheduler if background else BlockingScheduler)(timezone=TIMEZONE)
     for kind, times in (("lunch", LUNCH_TIMES), ("tea", TEA_TIMES)):
         for t in time_list(times):
